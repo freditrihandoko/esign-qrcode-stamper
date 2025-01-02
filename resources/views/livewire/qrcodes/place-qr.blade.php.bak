@@ -1,0 +1,217 @@
+<?php
+
+use Illuminate\Support\Facades\Storage;
+use Livewire\Volt\Component;
+use setasign\Fpdi\Fpdi;
+use App\Models\QrCode;
+use App\Models\Document;
+use Mary\Traits\Toast;
+
+new class extends Component {
+    use Toast;
+
+    public $qrCode;
+    public $document;
+    public $dragPosition = ['x' => 0, 'y' => 0];
+    public $signedFilePath = null;
+    public $isRegenerating = false;
+
+    public $pdfWidth = 0;
+    public $pdfHeight = 0;
+
+    public function mount(QrCode $qrCode, Document $document)
+    {
+        $this->qrCode = $qrCode;
+        $this->document = $document;
+
+        // Always check and set the signed file path from the database
+        $this->signedFilePath = $document->signed_file_path;
+    }
+
+    public function updateQrCodePosition($x, $y, $pdfWidth, $pdfHeight)
+    {
+        $this->dragPosition = [
+            'x' => max(0, $x),
+            'y' => max(0, $y),
+        ];
+        
+        // Store PDF viewer dimensions for more accurate conversion
+        $this->pdfWidth = $pdfWidth;
+        $this->pdfHeight = $pdfHeight;
+    }
+
+    public function confirmRegenerate()
+    {
+        $this->isRegenerating = true;
+    }
+
+    public function cancelRegenerate()
+    {
+        $this->isRegenerating = false;
+    }
+
+    public function generateSignedPdf()
+    {
+        $this->isRegenerating = false;
+
+        if ($this->signedFilePath && Storage::disk('public')->exists($this->signedFilePath)) {
+            Storage::disk('public')->delete($this->signedFilePath);
+        }
+
+        $qrCodePath = Storage::disk('public')->path($this->qrCode->qr_code_path);
+        $documentPath = Storage::disk('public')->path($this->qrCode->document->file_path);
+        $outputPath = 'documents/signed_documents/' . uniqid() . '_signed.pdf';
+
+        $pdf = new Fpdi('P', 'mm', 'A4');
+        $pageCount = $pdf->setSourceFile($documentPath);
+
+        for ($i = 1; $i <= $pageCount; $i++) {
+            $pdf->AddPage();
+            $tplIdx = $pdf->importPage($i);
+            $size = $pdf->getTemplateSize($tplIdx);
+
+            $pageWidth = $size['width'];
+            $pageHeight = $size['height'];
+
+            $pdf->useTemplate($tplIdx, 0, 0, $pageWidth, $pageHeight);
+
+            if ($i === 1) {
+                $qrCodeWidthMm = 30; // QR Code width in mm
+                $qrCodeHeightMm = 30; // QR Code height in mm
+
+                // More precise position conversion
+                $xPositionRatio = $this->dragPosition['x'] / $this->pdfWidth;
+                $yPositionRatio = $this->dragPosition['y'] / $this->pdfHeight;
+
+                $xPositionMm = $xPositionRatio * $pageWidth;
+                $yPositionMm = $yPositionRatio * $pageHeight;
+
+                // Ensure QR code is within page bounds
+                $xPositionMm = max(0, min($xPositionMm, $pageWidth - $qrCodeWidthMm));
+                $yPositionMm = max(0, min($yPositionMm, $pageHeight - $qrCodeHeightMm));
+
+                $pdf->Image($qrCodePath, $xPositionMm, $yPositionMm, $qrCodeWidthMm, $qrCodeHeightMm);
+            }
+        }
+
+        Storage::disk('public')->makeDirectory(dirname($outputPath));
+        $signedPath = Storage::disk('public')->path($outputPath);
+        $pdf->Output($signedPath, 'F');
+
+        $this->document->update([
+            'signed_file_path' => $outputPath,
+            'pdf_generated_at' => now(),
+            'status' => 'signed',
+        ]);
+
+        $this->signedFilePath = $outputPath;
+        $this->success('Signed PDF has been generated successfully!');
+    }
+
+    public function downloadSignedPdf()
+    {
+        if (!$this->signedFilePath) {
+            $this->warning('No signed PDF available.');
+            return;
+        }
+
+        return response()->download(Storage::disk('public')->path($this->signedFilePath), 'signed_document.pdf');
+    }
+};
+?>
+
+<div x-data="{
+    dragPosition: @entangle('dragPosition'),
+    isRegenerating: @entangle('isRegenerating'),
+    startDrag(event) {
+        const container = event.target.closest('#pdf-viewer');
+        const rect = container.getBoundingClientRect();
+
+        const offsetX = event.clientX - rect.left - this.dragPosition.x;
+        const offsetY = event.clientY - rect.top - this.dragPosition.y;
+
+        const moveHandler = (moveEvent) => {
+            const newX = moveEvent.clientX - rect.left - offsetX;
+            const newY = moveEvent.clientY - rect.top - offsetY;
+
+            // Constrain within container
+            const constrainedX = Math.max(0, Math.min(newX, rect.width - 64)); // 64 is QR code width
+            const constrainedY = Math.max(0, Math.min(newY, rect.height - 64)); // 64 is QR code height
+
+            this.dragPosition = {
+                x: Math.round(constrainedX),
+                y: Math.round(constrainedY)
+            };
+        };
+
+        const upHandler = () => {
+            document.removeEventListener('mousemove', moveHandler);
+            document.removeEventListener('mouseup', upHandler);
+
+            // Update backend with final position and PDF viewer dimensions
+            const container = event.target.closest('#pdf-viewer');
+            @this.updateQrCodePosition(
+                this.dragPosition.x, 
+                this.dragPosition.y,
+                container.clientWidth, 
+                container.clientHeight
+            );
+        };
+
+        document.addEventListener('mousemove', moveHandler);
+        document.addEventListener('mouseup', upHandler);
+    }
+}" class="container mx-auto px-4 py-8">
+    <!-- Regeneration Confirmation Modal -->
+    <div x-show="isRegenerating" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-white p-6 rounded-lg shadow-xl">
+            <h2 class="text-xl font-bold mb-4">Confirm Regeneration</h2>
+            <p class="mb-4">Are you sure you want to regenerate the signed PDF? The previous version will be replaced.
+            </p>
+            <div class="flex justify-end space-x-4">
+                <x-button wire:click="cancelRegenerate" label="Cancel" class="btn-secondary" />
+                <x-button wire:click="generateSignedPdf" label="Confirm" class="btn-primary" />
+            </div>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 gap-8">
+        <!-- Preview QR Code -->
+        <x-card title="Drag QR Code to Position">
+            <div id="pdf-viewer" class="relative w-full h-[600px] border border-dashed border-gray-300 p-4 bg-gray-100 rounded">
+                <div class="absolute cursor-move select-none z-10"
+                    :style="`top: ${dragPosition.y}px; left: ${dragPosition.x}px;`"
+                    @mousedown.prevent="startDrag($event)">
+                    <img src="{{ Storage::disk('public')->url($qrCode->qr_code_path) }}" alt="QR Code"
+                        class="w-16 h-16 object-contain" draggable="false">
+                </div>
+                <iframe src="{{ Storage::disk('public')->url($qrCode->document->file_path) }}"
+                    class="w-full h-full border rounded"></iframe>
+                  
+            </div>
+        </x-card>
+
+        <!-- Document Details -->
+        <x-card title="Document Details">
+            <div class="space-y-4">
+                <x-input label="Document Title" value="{{ $qrCode->document->title }}" readonly />
+                <x-input label="Document Number" value="{{ $qrCode->document->document_number }}" readonly />
+                <x-input label="Status" value="{{ ucwords($qrCode->document->status) }}" readonly />
+
+                @if ($signedFilePath)
+                    <div class="flex space-x-4">
+                        <x-button label="View Signed PDF" class="btn-primary"
+                            onclick="window.open('{{ Storage::disk('public')->url($signedFilePath) }}', '_blank')" />
+                        <x-button wire:click="downloadSignedPdf" label="Download Signed PDF" class="btn-secondary" />
+                    </div>
+                @endif
+            </div>
+        </x-card>
+    </div>
+
+    <!-- Generate PDF Button -->
+    <div class="flex justify-center mt-6">
+        <x-button wire:click="confirmRegenerate" wire:loading.attr="disabled" class="btn-success"
+            label="Generate Signed PDF" />
+    </div>
+</div>
