@@ -1,3 +1,5 @@
+
+
 # E-Signature QR Code Stamper
 
 Digital document management system built with Laravel 11, Livewire Volt, and MaryUI.
@@ -17,6 +19,7 @@ Digital document management system built with Laravel 11, Livewire Volt, and Mar
 - Livewire Volt
 - MaryUI
 - MySQL/PostgreSQL
+- <a href="https://github.com/TheArKaID/laravel-stamper"> Blade Laravel Stamper - The ArkaID </a>
 
 ## Database Structure
 
